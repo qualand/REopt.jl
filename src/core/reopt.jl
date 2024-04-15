@@ -226,7 +226,7 @@ function build_reopt!(m::JuMP.AbstractModel, p::REoptInputs)
 					@constraint(m, [t in p.heating_techs, ts in p.time_steps], m[:dvHeatToStorage][b,"SpaceHeating",ts] == 0)
 				end
 				if "ProcessHeat" in p.heating_loads_served_by_tes[b]
-					@constraint(m, [t in setdiff(p.heating_techs, p.techs_can_serve_space_heating), ts in p.time_steps], m[:dvHeatToStorage][b,"ProcessHeat",ts] == 0)
+					@constraint(m, [t in setdiff(p.heating_techs, p.techs_can_serve_process_heat), ts in p.time_steps], m[:dvHeatToStorage][b,"ProcessHeat",ts] == 0)
 				else
 					@constraint(m, [t in p.heating_techs, ts in p.time_steps], m[:dvHeatToStorage][b,"ProcessHeat",ts] == 0)
 				end
@@ -620,6 +620,9 @@ function add_variables!(m::JuMP.AbstractModel, p::REoptInputs)
 		if !isempty(p.s.storage.types.hot)
 			@variable(m, dvHeatToStorage[p.s.storage.types.hot, union(p.techs.heating, p.techs.chp), p.heating_loads, p.time_steps] >= 0) # Power charged to hot storage b at quality q [kW]
 			@variable(m, dvHeatFromStorage[p.s.storage.types.hot, p.heating_loads, p.time_steps] >= 0) # Power discharged from hot storage system b for load q [kW]
+			if !isempty(p.techs.steam_turbine)
+				@variable(m, dvHeatFromStorageToTurbine[p.s.storage.types.hot, p.heating_loads, p.time_steps] >= 0)
+			end
     	end
 	end
 

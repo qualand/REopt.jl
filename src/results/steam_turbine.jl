@@ -59,7 +59,7 @@ function add_steam_turbine_results(m::JuMP.AbstractModel, p::REoptInputs, d::Dic
 		sum(m[Symbol("dvRatedProduction"*_n)][t, ts] * p.production_factor[t, ts]
 			for t in p.techs.steam_turbine) - SteamTurbinetoBatt[ts] - SteamTurbinetoGrid[ts])
 	r["electric_to_load_series_kw"] = round.(value.(SteamTurbinetoLoad), digits=3)
-    if !isempty(p.s.storage.types.hot)
+    if ("HotThermalStorage" in p.s.storage.types.hot)
 		@expression(m, SteamTurbinetoHotTESKW[ts in p.time_steps],
 			sum(m[Symbol("dvHeatToStorage"*_n)]["HotThermalStorage",t,q,ts] for q in p.heating_loads, t in p.techs.steam_turbine))
 		@expression(m, SteamTurbineToHotTESByQualityKW[q in p.heating_loads, ts in p.time_steps],
@@ -91,7 +91,7 @@ function add_steam_turbine_results(m::JuMP.AbstractModel, p::REoptInputs, d::Dic
     end
     r["thermal_to_space_heating_load_series_mmbtu_per_hour"] = round.(value.(SteamTurbineToSpaceHeatingKW ./ KWH_PER_MMBTU), digits=5)
     
-    if "ProcessHeat" in p.heating_loads && p.s.steam_turbine.can_serve_space_heating
+    if "ProcessHeat" in p.heating_loads && p.s.steam_turbine.can_serve_process_heat
         @expression(m, SteamTurbineToProcessHeatKW[ts in p.time_steps], 
             m[Symbol("dvHeatingProduction"*_n)]["SteamTurbine","ProcessHeat",ts] - SteamTurbineToHotTESByQualityKW["ProcessHeat",ts] 
         )
