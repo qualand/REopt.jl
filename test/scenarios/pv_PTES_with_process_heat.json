@@ -16,6 +16,7 @@
         "can_serve_space_heating":true,
         "can_serve_process_heat":true,
         "retire_in_optimal": false
+        "can_charge_storage": false
     },
     "ProcessHeatLoad": {
         "annual_mmbtu": 876000.0
