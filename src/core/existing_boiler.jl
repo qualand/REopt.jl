@@ -20,6 +20,7 @@ struct ExistingBoiler <: AbstractThermalTech  # useful to create AbstractHeating
     can_serve_dhw::Bool
     can_serve_space_heating::Bool
     can_serve_process_heat::Bool
+    can_charge_storage::Bool
 end
 
 
@@ -42,6 +43,7 @@ end
     can_serve_dhw::Bool = true # If ExistingBoiler can supply heat to the domestic hot water load
     can_serve_space_heating::Bool = true # If ExistingBoiler can supply heat to the space heating load
     can_serve_process_heat::Bool = true # If ExistingBoiler can supply heat to the process heating load
+    can_charge_storage::Bool = true # IF ExistingBoiler can send heat to TES system
 ```
 
 !!! note "Max ExistingBoiler size" 
@@ -84,7 +86,8 @@ function ExistingBoiler(;
     time_steps_per_hour::Int = 1,
     can_serve_dhw::Bool = true,
     can_serve_space_heating::Bool = true,
-    can_serve_process_heat::Bool = true
+    can_serve_process_heat::Bool = true,
+    can_charge_storage::Bool = true
 )
     @assert fuel_type in FUEL_TYPES
     @assert production_type in ["steam", "hot_water"]
@@ -114,6 +117,7 @@ function ExistingBoiler(;
         emissions_factor_lb_PM25_per_mmbtu,
         can_serve_dhw,
         can_serve_space_heating,
-        can_serve_process_heat
+        can_serve_process_heat,
+        can_charge_storage
     )
 end
