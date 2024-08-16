@@ -185,6 +185,12 @@ function add_hot_thermal_storage_dispatch_constraints(m, p; _n="")
         )
     end
 
+    if !isnothing(p.s.existing_boiler) && !p.s.existing_boiler.can_charge_storage
+        for b in p.s.storage.types.hot, q in p.heating_loads, ts in p.time_steps
+            fix(m[Symbol("dvHeatToStorage"*_n)][b,"ExistingBoiler",q,ts], 0.0, force=true)
+        end
+    end
+
 end
 
 function add_cold_thermal_storage_dispatch_constraints(m, p, b; _n="")
