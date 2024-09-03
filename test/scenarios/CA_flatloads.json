@@ -5,22 +5,28 @@
     },
     "ElectricLoad": {
         "doe_reference_name": "FlatLoad",
-        "annual_kwh": 876000.0
+        "annual_kwh": 87600000.0
     },
     "ElectricTariff": {
-        "monthly_energy_rates": [0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1,0.1]
+        "urdb_label": "5a382db55457a3a149d2dd7e",
+        "wholesale_rate" : 0.0,
+        "NEM": false
     },
     "ExistingBoiler": {
-        "fuel_cost_per_mmbtu": 100.0,
+        "fuel_cost_per_mmbtu": 5.0,
+        "production_type": "steam",
+        "efficiency": 0.8,
+        "fuel_type": "natural_gas",
         "can_serve_dhw": true,
         "can_serve_space_heating":true,
         "can_serve_process_heat":true,
-        "retire_in_optimal": false
+        "retire_in_optimal": false,
+        "can_charge_storage": false
     },
     "ProcessHeatLoad": {
         "annual_mmbtu": 876000.0
     },
-     "Financial": {
+    "Financial": {
         "om_cost_escalation_rate_fraction": 0.025,
         "elec_cost_escalation_rate_fraction": 0.023,
         "existing_boiler_fuel_cost_escalation_rate_fraction": 0.034,

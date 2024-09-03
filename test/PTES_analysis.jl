@@ -4,11 +4,17 @@ using JuMP
 # using HiGHS
 using Xpress
 using JSON
-# using Plots
+# using CSV
+using DelimitedFiles
+using Plots
 
 using Printf
+using PyCall
 
 ENV["NREL_DEVELOPER_API_KEY"]="ogQAO0gClijQdYn7WOKeIS02zTUYLbwYJJczH9St"
+
+KWH_PER_MMBTU = 293.07107   # [kWh/mmbtu]
+KW_PER_MW = 1000.           # [kW/MW]
 
 function print_results(results)
     println("Sub-system Sizing:")
@@ -16,6 +22,12 @@ function print_results(results)
         println(@sprintf("\tPV: %5.3f kW", results["PV"]["size_kw"]))  
     else
         println("\tPV not in results.")
+    end
+    if "ElectricStorage" in keys(results)
+        println(@sprintf("\tElectricStorage: %5.3f kW", results["ElectricStorage"]["size_kw"]))
+        println(@sprintf("\tElectricStorage: %5.3f kWh", results["ElectricStorage"]["size_kwh"])) 
+    else
+        println("\tElectricStorage not in results.")
     end
     if "ElectricHeater" in keys(results)
         println(@sprintf("\tElectric Heater: %5.3f kW", results["ElectricHeater"]["size_mmbtu_per_hour"] * 293.07107))  # mmbtu/hr -> kW
@@ -49,13 +61,17 @@ function print_results(results)
     println("\tAnnual hot water load: ", results["HeatingLoad"]["annual_calculated_dhw_thermal_load_mmbtu"], " mmbtu")
     println("\tAnnual total heating load: ", results["HeatingLoad"]["annual_calculated_total_heating_thermal_load_mmbtu"], " mmbtu")
 
-    println("Electric Utility:")
+    println("Financial:")
     if "ElectricUtility" in keys(results)
         println("\tAnnual grid purchases: ", results["ElectricUtility"]["annual_energy_supplied_kwh"], " kWh")
-        println("\tLifecyle Electrical Bill After Tax: \$", results["Financial"]["lifecycle_elecbill_after_tax"])
-    else
-        println("\tNo electricity costs in results.")
     end
+    if "Financial" in keys(results)
+        println("\tLifecyle Electrical Bill After Tax: \$", results["Financial"]["lifecycle_elecbill_after_tax"])
+        println("\tLifecyle Fuel Bill After Tax: \$", results["Financial"]["lifecycle_fuel_costs_after_tax"])
+    else
+        println("\tNo financial in results.")
+    end
+
     println("Generation:")
     if "PV" in keys(results)
         println("\tPV production: ", results["PV"]["annual_energy_produced_kwh"], " kWh")
@@ -96,8 +112,10 @@ function print_results(results)
     if "HotThermalStorage" in keys(results)
         println("\tHotThermalStorage Size: ", results["HotThermalStorage"]["size_gal"], " gal")
         println("\tHotThermalStorage Size: ", results["HotThermalStorage"]["size_kwh"], " kWh")
-        println("\tHotThermalStorage to Turbine: ", round(sum(results["HotThermalStorage"]["storage_to_turbine_series_mmbtu_per_hour"]), digits = 2), " mmbtu")
-        println("\tHotThermalStorage to Load: ", round(sum(results["HotThermalStorage"]["storage_to_load_series_mmbtu_per_hour"]), digits = 2), " mmbtu")
+        if results["HotThermalStorage"]["size_kwh"] != 0.0
+            println("\tHotThermalStorage to Turbine: ", round(sum(results["HotThermalStorage"]["storage_to_turbine_series_mmbtu_per_hour"]), digits = 2), " mmbtu")
+            println("\tHotThermalStorage to Load: ", round(sum(results["HotThermalStorage"]["storage_to_load_series_mmbtu_per_hour"]), digits = 2), " mmbtu")
+        end
     end
     if "SteamTurbine" in keys(results)
         println("Steam Turbine:")
@@ -113,136 +131,152 @@ function print_results(results)
     end
 end
 
+function export_results_to_json(results, json_file_name)
 
-
-if false
-    # Load in site and load information
-    site_load = JSON.parsefile("siteLoad.json") # Enables consistent site and load for all cases
-
-    # Technology cases
-    pv_bat_eheater_case = merge(site_load, JSON.parsefile("pv_bat_eheater.json"))
-    pv_bat_heatpump_case = merge(site_load, JSON.parsefile("pv_bat_heatpump.json"))
-
-
-    m1 = Model(Cbc.Optimizer)
-    m2 = Model(Cbc.Optimizer)
-    eh_results = run_reopt([m1,m2], pv_bat_eheater_case)
-    hp_results = run_reopt([m1,m2], pv_bat_heatpump_case)
-
-    # Testing Ploting results
-    ## https://docs.juliaplots.org/latest/tutorial/
-    y = eh_results["PV"]["electric_to_storage_series_kw"][24*50:24*53]
-    x = range(1, length(y), step = 1)
-    # plot(x, y)
-    println("elec to storage", y)
+    for tech in keys(results)
+        if typeof(results[tech]) <: Dict
+            for key in keys(results[tech])
+                if typeof(results[tech][key]) <: JuMP.Containers.DenseAxisArray
+                    results[tech][key] = Array(results[tech][key])
+                elseif typeof(results[tech][key]) <: Vector
+                    results[tech][key] = Array(results[tech][key])
+                end
+            end
+        end
+    end
+    json_string = JSON.json(results)
+    open(json_file_name, "w") do file
+        write(file, json_string)
+    end
 end
 
-##Case 1: BAU
-
-d = JSON.parsefile("./scenarios/pv_PTES_with_process_heat_bau.json")
-d["ProcessHeatLoad"] = Dict()
-d["ElectricTariff"] = Dict()
-d["ElectricTariff"]["tou_energy_rates_per_kwh"] = ones(8760) .* 0.5
-d["ProcessHeatLoad"]["fuel_loads_mmbtu_per_hour"] = ones(8760) .* 100.0
-d["ProcessHeatLoad"]["fuel_loads_mmbtu_per_hour"][1] = 0.0  #initialize so that storage may charge in the first time period
-for ts in 1:4380 #free electricity every other hour, expect the turbine to run to meet electricity when possible
-    d["ProcessHeatLoad"]["fuel_loads_mmbtu_per_hour"][ts*2-1] = 0
-    d["ElectricTariff"]["tou_energy_rates_per_kwh"][ts*2-1] = 0
+function add_tariff_data_to_results(results, p)
+    results["ElectricTariff"]["energy_rates_per_kwh"] = p.s.electric_tariff.energy_rates
+    results["ElectricTariff"]["monthly_demand_rates_per_kw"] = p.s.electric_tariff.monthly_demand_rates
+    results["ElectricTariff"]["time_steps_monthly"] = p.s.electric_tariff.time_steps_monthly
+    results["ElectricTariff"]["tou_demand_rates_per_kw"] = p.s.electric_tariff.tou_demand_rates
+    results["ElectricTariff"]["tou_demand_time_steps"] = p.s.electric_tariff.tou_demand_ratchet_time_steps
+    return results
 end
-s = Scenario(d)
-p = REoptInputs(s)
-m1 = Model(optimizer_with_attributes(Xpress.Optimizer, "MIPRELSTOP" => 0.01, "OUTPUTLOG" => 0))
-results = run_reopt(m1, p) # TODO: Get steam turbine working for electric load
-#results = run_reopt(m1, "pv_PTES_with_process_heat.json")
 
+function solve_model_save_res(input_dict, print_msg, res_file)
+    # Set up scenario
+    s = Scenario(input_dict)
+    p = REoptInputs(s)
 
-println("Results of Case 1: Business as Usual (BAU)")
-print_results(results)
+    # Create model with solver params and solve
+    # Xpress solver options: https://www.fico.com/fico-xpress-optimization/docs/latest/solver/optimizer/HTML/chapter7.html
+    m1 = Model(optimizer_with_attributes(Xpress.Optimizer, "MIPRELSTOP" => 0.01, "OUTPUTLOG" => 1, "MAXTIME" => 500))
+    results = run_reopt(m1, p)
 
+    # Print results
+    println(print_msg)
+    print_results(results)
 
-##Case 2: Only PV, Elecric Heater -> Hot Sensible TES
-d = JSON.parsefile("./scenarios/pv_PTES_with_process_heat_no_turbine.json")
-d["ProcessHeatLoad"] = Dict()
-d["ElectricTariff"] = Dict()
-d["ElectricTariff"]["tou_energy_rates_per_kwh"] = ones(8760) .* 0.5
-d["ProcessHeatLoad"]["fuel_loads_mmbtu_per_hour"] = ones(8760) .* 100.0
-d["ProcessHeatLoad"]["fuel_loads_mmbtu_per_hour"][1] = 0.0  #initialize so that storage may charge in the first time period
-for ts in 1:4380 #free electricity and no heat load every other hour, expect the turbine to run to meet electricity and heat (?) when possible
-    d["ProcessHeatLoad"]["fuel_loads_mmbtu_per_hour"][ts*2-1] = 0
-    d["ElectricTariff"]["tou_energy_rates_per_kwh"][ts*2-1] = 0
+    # Add electric tariff and save results
+    results = add_tariff_data_to_results(results, p)
+    export_results_to_json(results, res_file)
 end
-s = Scenario(d)
-p = REoptInputs(s)
-# println([p.s.electric_tariff.energy_rates[ts,1] for ts in 1:10])
-# m1 = Model(optimizer_with_attributes(HiGHS.Optimizer, "output_flag" => true, "log_to_console" => true, "mip_rel_gap" => 0.01))
-m1 = Model(optimizer_with_attributes(Xpress.Optimizer, "MIPRELSTOP" => 0.01, "OUTPUTLOG" => 0))
-results = run_reopt(m1, p) # TODO: Get steam turbine working for electric load
-#results = run_reopt(m1, "pv_PTES_with_process_heat.json")
-println("Results of Case 2: Only PV, Elecric Heater -> Hot Sensible TES")
-print_results(results)
 
-##Case 3: PV, Electric Heater -> Hot Sensible TES -> Steam Turbine OR Load
+is_bau = true
+is_pv_bat_eh_ots = true
+is_pv_bat_hp_ots = true
+is_pv_ptes_ots = true
+run_retire_boiler_cases = true
 
-d = JSON.parsefile("./scenarios/pv_PTES_with_process_heat_no_hot_tes.json")
-d["ProcessHeatLoad"] = Dict()
-d["ElectricTariff"] = Dict()
-d["ElectricTariff"]["tou_energy_rates_per_kwh"] = ones(8760) .* 0.5
-d["ProcessHeatLoad"]["fuel_loads_mmbtu_per_hour"] = ones(8760) .* 1.0
-d["ProcessHeatLoad"]["fuel_loads_mmbtu_per_hour"][1] = 0.0  #initialize so that storage may charge in the first time period
-for ts in 1:4380 #free electricity and no heat load every other hour, expect the turbine to run to meet electricity and heat (?) when possible
-    d["ProcessHeatLoad"]["fuel_loads_mmbtu_per_hour"][ts*2-1] = 0
-    d["ElectricTariff"]["tou_energy_rates_per_kwh"][ts*2-1] = 0
+results_root = "C:/Users/whamilt2/Documents/Projects/LDRD_PTES_CHP/reopt_study/results_zerominTES/"
+
+# Reading Site and Load data
+site_load = JSON.parsefile("./test/scenarios/CA_flatloads.json")
+# Flat process heat load
+heat_load_mw = 1  # [MWt]
+heat_load_mmbtu_per_hour = heat_load_mw * KW_PER_MW * (1/KWH_PER_MMBTU) / site_load["ExistingBoiler"]["efficiency"]
+site_load["ProcessHeatLoad"] = Dict()
+site_load["ProcessHeatLoad"]["fuel_loads_mmbtu_per_hour"] = ones(8760) .* heat_load_mmbtu_per_hour
+site_load["ProcessHeatLoad"]["fuel_loads_mmbtu_per_hour"][1] = 0.0  #initialize so that storage may charge in the first time period
+
+## Case 0: BAU
+if is_bau
+    solve_model_save_res(site_load, 
+    "Results of Case 0: Business as Usual (BAU)",
+    results_root * "case0_bau_results.json")
 end
-s = Scenario(d)
-p = REoptInputs(s)
-# println([p.s.electric_tariff.energy_rates[ts,1] for ts in 1:10])
-m1 = Model(optimizer_with_attributes(Xpress.Optimizer, "MIPRELSTOP" => 0.01, "OUTPUTLOG" => 0))
-results = run_reopt(m1, p) # TODO: Get steam turbine working for electric load
-#results = run_reopt(m1, "pv_PTES_with_process_heat.json")
-# Print out solution
-# println(results["Messages"])
-println("Results of Case 3: PV, Electric Heater -> Hot Sensible TES -> Steam Turbine OR Load")
-print_results(results)
 
-##Case 4: PV, Electric Heater, Hot Sensible TES, Steam Turbine, Hot Thermal Storage
+##Case 1 and 4: Only PV, Battery, and Elecric Heater -> low-temp TES
+if is_pv_bat_eh_ots
+    d = JSON.parsefile("./test/scenarios/pv_battery_eh_lowtempTES.json")
+    d = merge(d, site_load)
 
-d = JSON.parsefile("./scenarios/pv_PTES_with_process_heat.json")
-d["ProcessHeatLoad"] = Dict()
-d["ElectricTariff"] = Dict()
-d["ElectricTariff"]["tou_energy_rates_per_kwh"] = ones(8760) .* 0.5
-d["ProcessHeatLoad"]["fuel_loads_mmbtu_per_hour"] = ones(8760) .* 1.0
-d["ProcessHeatLoad"]["fuel_loads_mmbtu_per_hour"][1] = 0.0  #initialize so that storage may charge in the first time period
-for ts in 1:4380 #free electricity every other hour, expect the turbine to run to meet electricity when possible
-    d["ProcessHeatLoad"]["fuel_loads_mmbtu_per_hour"][ts*2-1] = 0
-    d["ElectricTariff"]["tou_energy_rates_per_kwh"][ts*2-1] = 0
+    # Fix PV capacity - if needed
+    #d["PV"]["existing_kw"] = 100000.0
+    #d["PV"]["min_kw"] = 91608.0 #90000.0 #100000.0
+    #d["PV"]["max_kw"] = 91608.0 #90000.0 #100000.0
+    d["PV"]["max_kw"] = 1000000.0
+
+    solve_model_save_res(d, 
+    "Results of Case 1: Only PV, Battery, Elecric Heater -> low-temp TES",
+    results_root * "case1_pv_bat_eh_ots_results.json")
+
+    if run_retire_boiler_cases
+        # Retire boiler
+        d["ExistingBoiler"]["retire_in_optimal"] = true
+        solve_model_save_res(d, 
+        "Results of Case 4: (retire boiler) Only PV, Battery, Elecric Heater -> low-temp TES",
+        results_root * "case4_retireBoiler_pv_bat_eh_ots_results.json")
+    end
 end
-d["PV"]["max_kw"] = 100000.0
-s = Scenario(d)
-p = REoptInputs(s)
-m1 = Model(optimizer_with_attributes(Xpress.Optimizer, "MIPRELSTOP" => 0.01, "OUTPUTLOG" => 0))
-results = run_reopt(m1, p) # TODO: Get steam turbine working for electric load
-#results = run_reopt(m1, "pv_PTES_with_process_heat.json")
-# println(results["Messages"])
-println("Results of Case 4: PV, Electric Heater, Hot Sensible TES, Steam Turbine, Hot Thermal Storage")
-print_results(results)
 
-# Case 5: Retire the boiler
-d["ExistingBoiler"]["retire_in_optimal"] = true
-s = Scenario(d)
-p = REoptInputs(s)
-m1 = Model(optimizer_with_attributes(Xpress.Optimizer, "MIPRELSTOP" => 0.01, "OUTPUTLOG" => 0))
-results = run_reopt(m1, p) # TODO: Get steam turbine working for electric load
-#results = run_reopt(m1, "pv_PTES_with_process_heat.json")
-println(results["Messages"])
-println("Results of Case 5: Retire Boiler")
-print_results(results)
+##Case 2 and 5: Only PV, Battery, and Heat Pump -> low-temp TES
+if is_pv_bat_hp_ots
+    # d = JSON.parsefile("./test/scenarios/pv_battery_hp_lowtempTES.json")  # Modifying electric heater case
+    d = JSON.parsefile("./test/scenarios/pv_battery_eh_lowtempTES.json")
+    d = merge(d, site_load)
 
-# start_day = 0
-# end_day = 3
-# # Energy flows into
-# pv_gen = results["PV"]["electric_to_load_series_kw"][24*start_day + 1:24*end_day]
+    # Heat pump parameters modifications
+    d["ElectricHeater"]["cop"] = 2.0
+    d["ElectricHeater"]["installed_cost_per_mmbtu_per_hour"] = 161189.0
+    d["ElectricHeater"]["om_cost_per_mmbtu_per_hour"] = 8060.0              # ~5% of installed cost
+    
+    # Fix PV capacity
+    #d["PV"]["existing_kw"] = 100000.0
+    #d["PV"]["min_kw"] = 91608.0 #90000.0 #100000.0
+    #d["PV"]["max_kw"] = 91608.0 #90000.0 #100000.0
+    d["PV"]["max_kw"] = 1000000.0
 
+    solve_model_save_res(d, 
+    "Results of Case 2: PV, Battery, Heat pump -> low-temp TES",
+    results_root * "case2_pv_bat_hp_ots_results.json")
 
-# time = range(1, length(pv_gen), step = 1)
-# plot(time, pv_gen)
+    if run_retire_boiler_cases
+        # Retire boiler
+        d["ExistingBoiler"]["retire_in_optimal"] = true
+        solve_model_save_res(d, 
+        "Results of Case 5: (retire boiler) Only PV, Battery, Heat pump -> low-temp TES",
+        results_root * "case5_retireBoiler_pv_bat_hp_ots_results.json")
+    end
+end
+
+##Case 3 and 6: PV, PTES (Electric Heater, Hot Sensible TES, Steam Turbine) -> low-temp TES
+if is_pv_ptes_ots
+    d = JSON.parsefile("./test/scenarios/pv_PTES_lowtempTES.json")
+    d = merge(d, site_load)
+
+    # Fix PV capacity
+    #d["PV"]["existing_kw"] = 100000.0
+    #d["PV"]["min_kw"] = 36100.0 #90000.0 #100000.0
+    #d["PV"]["max_kw"] = 36100.0 #90000.0 #100000.0
+    d["PV"]["max_kw"] = 1000000.0
+
+    solve_model_save_res(d, 
+    "Results of Case 3: PV, PTES (Electric Heater, Hot Sensible TES, Steam Turbine) -> low-temp TES",
+    results_root * "case3_pv_PTES_ots_results.json")
+
+    if run_retire_boiler_cases
+        # Retire boiler
+        d["ExistingBoiler"]["retire_in_optimal"] = true
+        solve_model_save_res(d, 
+        "Results of Case 6: (retire boiler) PV, PTES (Electric Heater, Hot Sensible TES, Steam Turbine) -> low-temp TES",
+        results_root * "case6_pv_PTES_ots_results.json")
+    end
+end
 
